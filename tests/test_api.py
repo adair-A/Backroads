@@ -66,5 +66,30 @@ class ApiMemorySafetyTests(unittest.TestCase):
         self.assertIn("still being generated", raised.exception.detail)
 
 
+class RouteValidationTests(unittest.TestCase):
+    def test_validation_is_opt_in(self):
+        with patch.dict("os.environ", {}, clear=True):
+            result = api._validate_drivable_route(object())
+        self.assertEqual(result["status"], "not_configured")
+
+    def test_validation_uses_configured_provider(self):
+        validated = type("Validated", (), {"to_dict": lambda self: {"status": "validated", "provider": "valhalla"}})()
+        environment = {"VALHALLA_ROUTE_VALIDATION": "true", "VALHALLA_URL": "http://valhalla:8002"}
+        with patch.dict("os.environ", environment, clear=True), patch(
+            "api.ValhallaRoutingProvider.validate", return_value=validated
+        ) as validate:
+            result = api._validate_drivable_route(object())
+        self.assertEqual(result["status"], "validated")
+        validate.assert_called_once()
+
+    def test_validation_failure_keeps_planning_route_available(self):
+        environment = {"VALHALLA_ROUTE_VALIDATION": "true", "VALHALLA_URL": "http://valhalla:8002"}
+        with patch.dict("os.environ", environment, clear=True), patch(
+            "api.ValhallaRoutingProvider.validate", side_effect=api.RoutingProviderError("offline")
+        ):
+            result = api._validate_drivable_route(object())
+        self.assertEqual(result["status"], "unavailable")
+
+
 if __name__ == "__main__":
     unittest.main()

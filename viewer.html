@@ -31,12 +31,8 @@
   select,input[type="text"] { width:100%; padding:11px 12px; color:var(--ink); background:#fff; border:1px solid var(--line); border-radius:11px; outline:none; }
   select:focus,input:focus { border-color:#729177; box-shadow:0 0 0 3px rgba(49,92,59,.1); }
   input[type="range"] { width:100%; accent-color:var(--moss); cursor:pointer; }
-  #modeHint { min-height:34px; margin-top:7px; color:var(--muted); font-size:11px; line-height:1.45; }
-  #pinStatus { display:grid; gap:7px; margin-top:13px; }
-  .pin-row { display:flex; align-items:center; gap:9px; padding:9px 10px; background:#eef1e9; border-radius:10px; font-size:11px; }
-  .pin-dot { width:9px; height:9px; flex:0 0 auto; border-radius:50%; background:#aab3aa; box-shadow:0 0 0 4px rgba(170,179,170,.18); }
-  .pin-row.ready .pin-dot { background:var(--moss); box-shadow:0 0 0 4px rgba(49,92,59,.14); }
-  .pin-row.target.ready .pin-dot { background:var(--orange); box-shadow:0 0 0 4px rgba(232,115,53,.14); }
+  .address-help { margin:6px 0 0; color:var(--muted); font-size:10px; line-height:1.4; }
+  #resolvedAddresses { display:none; margin-top:10px; padding:9px 10px; color:var(--muted); background:#eef1e9; border-radius:10px; font-size:9px; line-height:1.45; }
   .preference { padding:12px 0; border-top:1px solid var(--line); }
   .preference:first-child { border-top:0; }
   .preference small { display:block; margin-top:3px; color:var(--muted); font-size:10px; line-height:1.35; }
@@ -49,7 +45,7 @@
   #generate { padding:13px 16px; color:white; background:var(--moss); font-weight:800; box-shadow:0 7px 18px rgba(49,92,59,.2); }
   #generate:hover { background:#264b30; }
   #generate:disabled { cursor:wait; opacity:.62; }
-  #clearPins { padding:13px 14px; color:var(--muted); background:#ecefe8; font-weight:700; }
+  #resetForm { padding:13px 14px; color:var(--muted); background:#ecefe8; font-weight:700; }
   details { margin-top:14px; color:var(--muted); font-size:11px; }
   details summary { cursor:pointer; font-weight:700; }
   .advanced { display:grid; gap:8px; margin-top:9px; }
@@ -61,6 +57,10 @@
   .metric strong { display:block; font-family:Georgia,serif; font-size:18px; font-weight:500; }
   .metric span { color:#b8c3b9; font-size:9px; text-transform:uppercase; }
   .result-note { margin:10px 0 0; color:#b8c3b9; font-size:9px; line-height:1.4; }
+  .route-actions { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:11px; }
+  .route-actions a,.route-actions button { display:flex; align-items:center; justify-content:center; min-height:36px; padding:8px; color:#172019; background:#eef3e9; border-radius:9px; font-size:10px; font-weight:800; text-decoration:none; text-align:center; }
+  .route-actions a:hover,.route-actions button:hover { background:var(--lime); }
+  .handoff-note { margin:8px 0 0; color:#9eaba0; font-size:8px; line-height:1.4; }
   #error { margin-top:10px; color:#a92828; font-size:11px; line-height:1.4; }
   .legend { position:fixed; z-index:1; right:16px; bottom:16px; padding:10px 12px; border-radius:12px; background:rgba(250,249,244,.9); box-shadow:0 8px 25px rgba(25,42,29,.16); font-size:10px; }
   .gradient { width:120px; height:5px; margin:5px 0; border-radius:99px; background:linear-gradient(90deg,#59636f,#f39c35,#d7193f); }
@@ -70,9 +70,10 @@
 <body>
 <main id="controls" aria-label="Route planner"><div class="panel-scroll">
   <div class="brand"><div><div class="eyebrow">Find the long way</div><h1>Backroad</h1></div><span class="beta">LOCAL BETA</span></div>
-  <p class="intro">Routes shaped around quiet roads, good curves, and fewer city interruptions.</p>
-  <label class="field" for="routeMode"><span class="field-head"><span class="field-title">Route style</span></span><select id="routeMode"><option value="explore">Explore an area, then come home</option><option value="loop">Freeform loop from home</option><option value="point_to_point">Drive to a destination</option></select></label>
-  <div id="modeHint"></div><div id="pinStatus" aria-live="polite"></div>
+  <p class="intro">Enter where you’re leaving from. Add a destination only when you need one; otherwise Backroad builds a scenic loop and brings you home.</p>
+  <label class="field" for="startAddress"><span class="field-head"><span class="field-title">Start address</span></span><input id="startAddress" type="text" autocomplete="street-address" placeholder="123 Main St, City, MN 55555"></label>
+  <label class="field" for="endAddress"><span class="field-head"><span class="field-title">Destination</span><span class="field-value">Optional</span></span><input id="endAddress" type="text" autocomplete="street-address" placeholder="Leave blank for a return loop"></label>
+  <p class="address-help">Addresses are resolved only when you build the route. Include city and state for the most specific match.</p><div id="resolvedAddresses" aria-live="polite"></div>
   <label class="field" for="distance"><span class="field-head"><span class="field-title">Approximate distance</span><span class="field-value"><span id="distanceValue">60</span> mi</span></span><input id="distance" type="range" min="10" max="200" step="5" value="60"></label>
   <div class="field"><div class="field-head"><span class="field-title">Backroad preferences</span></div>
     <label class="safety-toggle"><input id="pavedOnly" type="checkbox" checked><span>Paved roads only<small>Hard-excludes roads OSM marks dirt, gravel, compacted, or unpaved. Unknown surfaces are disclosed after routing.</small></span></label>
@@ -81,7 +82,7 @@
     <div class="preference"><div class="field-head"><span>Scenic surroundings</span><span class="field-value" id="sceneryValue">High</span></div><input id="sceneryWeight" type="range" min="0" max="1" step="0.1" value="0.8"><small>Prefers nearby water, forest, parks, natural land, countryside, and viewpoints.</small></div>
     <div class="preference"><div class="field-head"><span>Low-interruption roads</span><span class="field-value" id="trafficValue">High</span></div><input id="trafficWeight" type="range" min="0" max="1" step="0.1" value="0.7"></div>
   </div>
-  <div class="actions"><button id="generate">Build my route</button><button id="clearPins" aria-label="Clear map pins">Reset</button></div>
+  <div class="actions"><button id="generate">Build my route</button><button id="resetForm" aria-label="Reset route form">Reset</button></div>
   <div id="error" role="alert"></div><section id="result" aria-live="polite"></section>
   <details><summary>Local server settings</summary><div class="advanced"><label>API base URL<input id="apiBase" type="text"></label><label>Loaded region<input id="region" type="text" value="minnesota"></label></div></details>
 </div></main>
@@ -90,9 +91,9 @@
 <script>
 const map = new maplibregl.Map({ container:'map', style:'https://tiles.openfreemap.org/styles/liberty', center:[-93.2650,44.9778], zoom:10 });
 map.addControl(new maplibregl.NavigationControl({ showCompass:false }), 'top-right');
-let startPin=null, targetPin=null, startMarker=null, targetMarker=null;
-let activeRequest=null, progressTimer=null;
-const byId=id=>document.getElementById(id), mode=()=>byId('routeMode').value;
+let startMarker=null, targetMarker=null;
+let activeRequest=null, progressTimer=null, currentRouteData=null;
+const byId=id=>document.getElementById(id);
 byId('apiBase').value=location.protocol==='file:'?'http://localhost:8000':location.origin;
 const levelLabel=value=>value>=.85?'Strong':value>=.6?'High':value>=.35?'Medium':'Light';
 function showRoute(geojson) {
@@ -100,40 +101,53 @@ function showRoute(geojson) {
   if(!map.getLayer('route-main')) map.addLayer({id:'route-main',type:'line',source:'route',filter:['!=',['get','is_connector'],true],layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':['interpolate',['linear'],['coalesce',['get','curviness_score'],0],0,'#59636f',50,'#f39c35',100,'#d7193f'],'line-width':5,'line-opacity':.92}});
   if(!map.getLayer('route-connectors')) map.addLayer({id:'route-connectors',type:'line',source:'route',filter:['==',['get','is_connector'],true],layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#59636f','line-width':5,'line-opacity':.9,'line-dasharray':[2,2]}});
 }
-function updateModeUI(){
-  const hints={explore:'Click your start, then click the area you want to explore. The route returns to your start.',loop:'Click your start. We’ll find a backroad loop and bring you home.',point_to_point:'Click your start, then click your destination.'};
-  byId('modeHint').textContent=hints[mode()];
-  if(mode()==='loop'&&targetPin){targetMarker.remove();targetMarker=null;targetPin=null;} updatePinStatus();
+function routeCoordinates(data){const geojson=data.route_validation?.status==='validated'?data.route_validation.geojson:data.geojson;return geojson.features.flatMap(feature=>feature.geometry.coordinates).filter((point,index,all)=>!index||point[0]!==all[index-1][0]||point[1]!==all[index-1][1]);}
+function xmlEscape(value){return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[char]));}
+function htmlEscape(value){return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
+function downloadGpx(){
+  if(!currentRouteData)return;
+  const points=routeCoordinates(currentRouteData);
+  const track=points.map(([lon,lat])=>`    <trkpt lat="${lat.toFixed(7)}" lon="${lon.toFixed(7)}"/>`).join('\n');
+  const name=`Backroads ${currentRouteData.total_length_mi} mile route`;
+  const gpx=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Backroads" xmlns="http://www.topografix.com/GPX/1/1">\n  <metadata><name>${xmlEscape(name)}</name><desc>${xmlEscape(currentRouteData.score_basis)}</desc></metadata>\n  <trk><name>${xmlEscape(name)}</name><trkseg>\n${track}\n  </trkseg></trk>\n</gpx>\n`;
+  const url=URL.createObjectURL(new Blob([gpx],{type:'application/gpx+xml'}));
+  const link=document.createElement('a');link.href=url;link.download=`backroads-${currentRouteData.total_length_mi}-mi.gpx`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
-function pinText(pin){return pin?`${pin.lat.toFixed(4)}, ${pin.lon.toFixed(4)}`:'Click the map to set';}
-function updatePinStatus(){
-  const needsTarget=mode()!=='loop', targetLabel=mode()==='explore'?'Explore near':'Destination';
-  byId('pinStatus').innerHTML=`<div class="pin-row ${startPin?'ready':''}"><span class="pin-dot"></span><strong>Start</strong><span>${pinText(startPin)}</span></div>${needsTarget?`<div class="pin-row target ${targetPin?'ready':''}"><span class="pin-dot"></span><strong>${targetLabel}</strong><span>${pinText(targetPin)}</span></div>`:''}`;
+function setStart(lng,lat){if(startMarker)startMarker.remove();startMarker=new maplibregl.Marker({color:'#315c3b'}).setLngLat([lng,lat]).addTo(map);}
+function setTarget(lng,lat){if(targetMarker)targetMarker.remove();targetMarker=new maplibregl.Marker({color:'#e87335'}).setLngLat([lng,lat]).addTo(map);}
+async function geocode(base,address){
+  const response=await fetch(`${base}/geocode?q=${encodeURIComponent(address)}`,{signal:activeRequest.signal});
+  const data=await response.json();if(!response.ok)throw new Error(data.detail||`Could not locate “${address}”.`);return data.matches[0];
 }
-function setStart(lng,lat){if(startMarker)startMarker.remove();startPin={lon:lng,lat};startMarker=new maplibregl.Marker({color:'#315c3b'}).setLngLat([lng,lat]).addTo(map);}
-function setTarget(lng,lat){if(targetMarker)targetMarker.remove();targetPin={lon:lng,lat};targetMarker=new maplibregl.Marker({color:'#e87335'}).setLngLat([lng,lat]).addTo(map);}
-map.on('click',e=>{const{lng,lat}=e.lngLat;if(!startPin)setStart(lng,lat);else if(mode()==='loop')setStart(lng,lat);else setTarget(lng,lat);updatePinStatus();});
-byId('routeMode').addEventListener('change',updateModeUI);
 byId('distance').addEventListener('input',e=>byId('distanceValue').textContent=e.target.value);
 for(const[input,output]of[['cityAvoidance','cityValue'],['curvinessWeight','curveValue'],['sceneryWeight','sceneryValue'],['trafficWeight','trafficValue']])byId(input).addEventListener('input',e=>byId(output).textContent=levelLabel(Number(e.target.value)));
-byId('clearPins').addEventListener('click',()=>{if(activeRequest)activeRequest.abort();if(startMarker)startMarker.remove();if(targetMarker)targetMarker.remove();startPin=targetPin=startMarker=targetMarker=null;if(map.getSource('route'))map.getSource('route').setData({type:'FeatureCollection',features:[]});byId('result').classList.remove('visible');byId('error').textContent='';updatePinStatus();});
+byId('resetForm').addEventListener('click',()=>{if(activeRequest)activeRequest.abort();if(startMarker)startMarker.remove();if(targetMarker)targetMarker.remove();startMarker=targetMarker=null;currentRouteData=null;byId('startAddress').value='';byId('endAddress').value='';byId('resolvedAddresses').style.display='none';if(map.getSource('route'))map.getSource('route').setData({type:'FeatureCollection',features:[]});byId('result').classList.remove('visible');byId('error').textContent='';});
+for(const field of [byId('startAddress'),byId('endAddress')])field.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();byId('generate').click();}});
 byId('generate').addEventListener('click',async()=>{
   const button=byId('generate'),error=byId('error'),result=byId('result');error.textContent='';result.classList.remove('visible');
-  if(!startPin){error.textContent='Set your start point on the map first.';return;} if(mode()!=='loop'&&!targetPin){error.textContent=`Set an ${mode()==='explore'?'exploration area':'destination'} on the map.`;return;}
-  const body={region:byId('region').value.trim(),start_lat:startPin.lat,start_lon:startPin.lon,target_distance_mi:Number(byId('distance').value),curviness_weight:Number(byId('curvinessWeight').value),scenery_weight:Number(byId('sceneryWeight').value),traffic_weight:Number(byId('trafficWeight').value),city_avoidance:Number(byId('cityAvoidance').value),paved_only:byId('pavedOnly').checked};
-  if(mode()==='explore'){body.focus_lat=targetPin.lat;body.focus_lon=targetPin.lon;} if(mode()==='point_to_point'){body.dest_lat=targetPin.lat;body.dest_lon=targetPin.lon;}
-  activeRequest=new AbortController();let elapsed=0;button.disabled=true;button.textContent='Finding nearby roads…';
+  const startAddress=byId('startAddress').value.trim(),endAddress=byId('endAddress').value.trim();if(!startAddress){error.textContent='Enter a start address first.';return;}
+  activeRequest=new AbortController();let elapsed=0;button.disabled=true;button.textContent='Finding your address…';
   progressTimer=setInterval(()=>{elapsed+=1;button.textContent=elapsed<8?`Finding nearby roads… ${elapsed}s`:elapsed<18?`Scoring backroads… ${elapsed}s`:`Shaping the loop… ${elapsed}s`;},1000);
   try{
-    const base=byId('apiBase').value.trim().replace(/\/$/,'');const response=await fetch(`${base}/generate-route`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:activeRequest.signal});const data=await response.json();if(!response.ok)throw new Error(data.detail||'No route could be built with these settings.');
-    const routeName=data.route_kind==='exploration_loop'?'Exploration loop':data.route_kind==='point_to_point'?'Backroad drive':'Backroad loop';
+    const base=byId('apiBase').value.trim().replace(/\/$/,'');const start=await geocode(base,startAddress),destination=endAddress?await geocode(base,endAddress):null;
+    setStart(start.lon,start.lat);if(destination)setTarget(destination.lon,destination.lat);else if(targetMarker){targetMarker.remove();targetMarker=null;}
+    const resolved=byId('resolvedAddresses');resolved.innerHTML=`<strong>Using:</strong> ${htmlEscape(start.display_name)}${destination?`<br><strong>To:</strong> ${htmlEscape(destination.display_name)}`:'<br><strong>Route:</strong> Scenic return loop'}`;resolved.style.display='block';
+    const body={region:byId('region').value.trim(),start_lat:start.lat,start_lon:start.lon,target_distance_mi:Number(byId('distance').value),curviness_weight:Number(byId('curvinessWeight').value),scenery_weight:Number(byId('sceneryWeight').value),traffic_weight:Number(byId('trafficWeight').value),city_avoidance:Number(byId('cityAvoidance').value),paved_only:byId('pavedOnly').checked};
+    if(destination){body.dest_lat=destination.lat;body.dest_lon=destination.lon;}
+    button.textContent='Scoring backroads…';const response=await fetch(`${base}/generate-route`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:activeRequest.signal});const data=await response.json();if(!response.ok)throw new Error(data.detail||'No route could be built with these settings.');
+    currentRouteData=data;const routeName=data.route_kind==='exploration_loop'?'Exploration loop':data.route_kind==='point_to_point'?'Backroad drive':'Backroad loop';
     const sceneryText=data.scenery_signals?.length?` Nearby: ${data.scenery_signals.join(', ')}.`:'';
-    result.innerHTML=`<div class="result-kicker">${routeName} ready</div><div class="result-grid"><div class="metric"><strong>${data.total_length_mi}</strong><span>Miles</span></div><div class="metric"><strong>${data.curviness_score??'—'}</strong><span>Curves</span></div><div class="metric"><strong>${data.scenery_score??'—'}</strong><span>Scenery</span></div></div><p class="result-note">${data.estimated_time_min} min estimated. ${data.surface_notice} ${data.score_basis}${sceneryText}</p>`;
+    const nav=data.navigation||{};
+    const validation=data.route_validation||{},validated=validation.status==='validated';
+    const validationText=validated?`Valhalla verified a drivable path and generated ${validation.maneuvers?.length||0} turn instructions.`:'This is a scenic planning route; navigation validation is not enabled or is temporarily unavailable.';
+    const maneuvers=validated&&validation.maneuvers?.length?`<details><summary>Turn-by-turn directions</summary><ol>${validation.maneuvers.map(step=>`<li>${htmlEscape(step.instruction)}${step.length_mi!=null?` <small>(${Number(step.length_mi).toFixed(1)} mi)</small>`:''}</li>`).join('')}</ol></details>`:'';
+    result.innerHTML=`<div class="result-kicker">${routeName} ready</div><div class="result-grid"><div class="metric"><strong>${data.total_length_mi}</strong><span>Miles</span></div><div class="metric"><strong>${data.curviness_score??'—'}</strong><span>Curves</span></div><div class="metric"><strong>${data.scenery_score??'—'}</strong><span>Scenery</span></div></div><p class="result-note">${data.estimated_time_min} min estimated. ${data.surface_notice} ${data.score_basis}${sceneryText}</p><div class="route-actions"><button id="downloadGpx" type="button">Download GPX</button>${nav.google_maps_url?`<a href="${nav.google_maps_url}" target="_blank" rel="noopener">Google Maps</a>`:''}${nav.apple_maps_url?`<a href="${nav.apple_maps_url}" target="_blank" rel="noopener">Apple Maps</a>`:''}${nav.waze_url?`<a href="${nav.waze_url}" target="_blank" rel="noopener">${nav.waze_label}</a>`:''}</div><p class="handoff-note">${validationText} GPX uses the ${validated?'validated navigation path':'complete Backroads track'}. Google, Apple, Waze, and GPS devices may still recalculate it.</p>${maneuvers}`;
+    byId('downloadGpx').addEventListener('click',downloadGpx);
     result.classList.add('visible');showRoute(data.geojson);const coords=data.geojson.features.flatMap(feature=>feature.geometry.coordinates);
     if(coords.length){const bounds=coords.reduce((b,coordinate)=>b.extend(coordinate),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(bounds,{padding:{top:55,right:55,bottom:55,left:window.innerWidth>680?410:55}});}
   }catch(requestError){if(requestError.name!=='AbortError')error.textContent=requestError.message;}finally{clearInterval(progressTimer);progressTimer=null;activeRequest=null;button.disabled=false;button.textContent='Build my route';}
 });
-updateModeUI();
+byId('startAddress').focus();
 </script>
 </body>
 </html>

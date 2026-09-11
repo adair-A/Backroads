@@ -16,19 +16,24 @@ drivers. Internally everything still runs in meters.
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import threading
 import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from geocoding import GeocoderError, NominatimGeocoder
+from navigation import navigation_handoffs
 from road_store import RoadStoreConfigurationError, open_road_source
+from routing_provider import RoutingProviderError, ValhallaRoutingProvider
 from routing import (
+    _loop_overlap_ratio,
     build_network,
     generate_exploration_loop,
     generate_loop,
@@ -40,11 +45,20 @@ from routing import (
 # terminal -- that's what caused the 500 error you just hit.
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 MILES_TO_METERS = 1609.344
 NETWORK_CACHE_TTL_SECONDS = 300
 _network_cache: tuple[tuple, float, object] | None = None
 _network_cache_lock = threading.Lock()
 _route_generation_lock = threading.Lock()
+_geocoder = NominatimGeocoder(
+    base_url=os.environ.get("GEOCODER_URL", "https://nominatim.openstreetmap.org"),
+    user_agent=os.environ.get(
+        "GEOCODER_USER_AGENT", "Backroads/1.0 (https://github.com/ixbh/Backroads)"
+    ),
+    timeout_seconds=float(os.environ.get("GEOCODER_TIMEOUT_SECONDS", "10")),
+)
 
 app = FastAPI(title="Scenic Route Generator API")
 
@@ -77,6 +91,7 @@ def _get_network(region, center_lon, center_lat, radius_m, weights):
         region, round(center_lon, 5), round(center_lat, 5), round(radius_m, -1),
         round(weights["curviness"], 2), round(weights["traffic"], 2),
         round(weights["city_avoidance"], 2), round(weights["scenery"], 2),
+        round(weights.get("elevation", 0.0), 2),
         bool(weights["paved_only"]),
     )
     now = time.monotonic()
@@ -133,6 +148,10 @@ class RouteRequest(BaseModel):
         description="Strength of the penalty derived from nearby OSM stop/signal density.",
     )
     scenery_weight: float = Field(default=0.5, ge=0, le=1)
+    elevation_weight: float = Field(
+        default=0.35, ge=0, le=1,
+        description="Preference for roads with elevation gain and terrain variation.",
+    )
     paved_only: bool = Field(
         default=True,
         description="Exclude roads explicitly tagged unpaved and require tracks to have an explicit paved surface.",
@@ -155,6 +174,8 @@ class RouteSegmentOut(BaseModel):
     curviness_score: int | None
     scenery_score: int | None
     scenery_signals: dict
+    elevation_gain_m: float | None
+    elevation_score: int | None
     scenic_eligible: bool
     is_connector: bool
 
@@ -166,6 +187,11 @@ class RouteResponse(BaseModel):
     route_score: int | None
     curviness_score: int | None
     scenery_score: int | None
+    elevation_score: int | None
+    elevation_gain_m: float
+    repeated_road_percent: float
+    navigation: dict
+    route_validation: dict
     scenery_signals: list[str]
     score_basis: str
     segment_count: int
@@ -196,7 +222,7 @@ DEFAULT_SPEED_MPH = {
 }
 
 
-def _route_summary(route, curviness_weight: float, scenery_weight: float):
+def _route_summary(route, curviness_weight: float, scenery_weight: float, elevation_weight: float):
     """Return ETA plus length-weighted, explainable route signals."""
     hours = sum(
         (segment.length_m / MILES_TO_METERS) / DEFAULT_SPEED_MPH.get(segment.highway, 30)
@@ -220,11 +246,23 @@ def _route_summary(route, curviness_weight: float, scenery_weight: float):
         round(sum(s.scenery_score * s.length_m for s in scenic) / scenic_length)
         if scenic_length else None
     )
+    elevated = [
+        segment for segment in route.segments
+        if not segment.is_connector and segment.elevation_score is not None
+    ]
+    elevated_length = sum(segment.length_m for segment in elevated)
+    elevation_score = (
+        round(sum(s.elevation_score * s.length_m for s in elevated) / elevated_length)
+        if elevated_length else None
+    )
+    elevation_gain_m = round(sum(s.elevation_gain_m or 0 for s in elevated), 1)
     weighted = []
     if curve_score is not None and curviness_weight > 0:
         weighted.append((curve_score, curviness_weight))
     if scenery_score is not None and scenery_weight > 0:
         weighted.append((scenery_score, scenery_weight))
+    if elevation_score is not None and elevation_weight > 0:
+        weighted.append((elevation_score, elevation_weight))
     route_score = round(sum(score * weight for score, weight in weighted) / sum(weight for _, weight in weighted)) if weighted else None
     signal_lengths = {}
     for segment in scenic:
@@ -234,7 +272,10 @@ def _route_summary(route, curviness_weight: float, scenery_weight: float):
     notable_signals = [
         signal for signal, _ in sorted(signal_lengths.items(), key=lambda item: item[1], reverse=True)
     ]
-    return max(1, round(hours * 60)), route_score, curve_score, scenery_score, notable_signals
+    return (
+        max(1, round(hours * 60)), route_score, curve_score, scenery_score,
+        elevation_score, elevation_gain_m, notable_signals,
+    )
 
 
 def _surface_summary(route):
@@ -252,9 +293,41 @@ def _surface_summary(route):
     return totals
 
 
+def _validate_drivable_route(route) -> dict:
+    """Optionally replace planning geometry with a legal, maneuver-ready route."""
+    enabled = os.environ.get("VALHALLA_ROUTE_VALIDATION", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return {"status": "not_configured", "provider": "valhalla"}
+    base_url = os.environ.get("VALHALLA_URL", "").strip()
+    if not base_url:
+        return {"status": "not_configured", "provider": "valhalla"}
+    try:
+        timeout = float(os.environ.get("VALHALLA_TIMEOUT_SECONDS", "30"))
+        return ValhallaRoutingProvider(base_url, timeout_seconds=timeout).validate(route).to_dict()
+    except (RoutingProviderError, OSError, ValueError) as error:
+        logger.warning("Valhalla route validation unavailable: %s", error)
+        return {
+            "status": "unavailable",
+            "provider": "valhalla",
+            "message": "Navigation validation is temporarily unavailable; the scenic planning route is still usable.",
+        }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/geocode")
+def geocode_address(q: str = Query(min_length=3, max_length=300)):
+    """Resolve an explicitly submitted US address; never used for autocomplete."""
+    try:
+        matches = _geocoder.search(q)
+    except GeocoderError as error:
+        raise HTTPException(502, str(error)) from error
+    if not matches:
+        raise HTTPException(404, "Address not found. Include the city, state, or ZIP code and try again.")
+    return {"matches": matches, "attribution": "© OpenStreetMap contributors"}
 
 
 @app.get("/", include_in_schema=False)
@@ -330,6 +403,7 @@ def _generate_route(req: RouteRequest):
             "traffic": req.traffic_weight,
             "city_avoidance": req.city_avoidance,
             "scenery": req.scenery_weight,
+            "elevation": req.elevation_weight,
             "paved_only": req.paved_only,
         },
     )
@@ -376,8 +450,8 @@ def _generate_route(req: RouteRequest):
         )
 
     connector_length_m = sum(s.length_m for s in route.segments if s.is_connector)
-    estimated_time_min, route_score, curve_score, scenery_score, scenery_signals = _route_summary(
-        route, req.curviness_weight, req.scenery_weight
+    estimated_time_min, route_score, curve_score, scenery_score, elevation_score, elevation_gain_m, scenery_signals = _route_summary(
+        route, req.curviness_weight, req.scenery_weight, req.elevation_weight
     )
     surface_totals = _surface_summary(route)
     unknown_surface_mi = surface_totals["unknown"] / MILES_TO_METERS
@@ -399,9 +473,14 @@ def _generate_route(req: RouteRequest):
         route_score=route_score,
         curviness_score=curve_score,
         scenery_score=scenery_score,
+        elevation_score=elevation_score,
+        elevation_gain_m=elevation_gain_m,
+        repeated_road_percent=round(_loop_overlap_ratio(route) * 100, 1),
+        navigation=navigation_handoffs(route),
+        route_validation=_validate_drivable_route(route),
         scenery_signals=scenery_signals,
         score_basis=(
-            "Route score combines OSM geometry curviness with nearby OSM landscape features. "
+            "Route score combines OSM geometry curviness, nearby landscape features, and available elevation data. "
             "Dense-area avoidance uses stop/signal and road-network density; live traffic is not scored."
         ),
         connector_length_mi=round(connector_length_m / MILES_TO_METERS, 2),
@@ -418,6 +497,8 @@ def _generate_route(req: RouteRequest):
                 curviness_score=s.curviness_score,
                 scenery_score=s.scenery_score,
                 scenery_signals=s.scenery_signals,
+                elevation_gain_m=s.elevation_gain_m,
+                elevation_score=s.elevation_score,
                 scenic_eligible=s.scenic_eligible,
                 is_connector=s.is_connector,
             )

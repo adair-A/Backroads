@@ -9,8 +9,10 @@ from routing import (
     RouteSegment,
     _connect_to_scenic_network,
     _edges_to_segments,
+    _loop_overlap_ratio,
     _path_with_fallback,
     build_network,
+    generate_loop,
     generate_exploration_loop,
     generate_point_to_point,
 )
@@ -27,6 +29,48 @@ def add_edge(graph, a, b, road_id, *, scenic=True, both=True, length=100.0):
 
 
 class RoutingTests(unittest.TestCase):
+    def test_loop_generation_is_deterministic(self):
+        graph = nx.MultiDiGraph()
+        nodes = [(0, 0), (0.01, 0), (0.01, 0.01), (0, 0.01)]
+        for index, (a, b) in enumerate(zip(nodes, nodes[1:] + nodes[:1]), 1):
+            add_edge(graph, a, b, index, length=1000)
+        network = RoadNetwork(graph, graph)
+        first = generate_loop(network, 0, 0, 4000)
+        second = generate_loop(network, 0, 0, 4000)
+        self.assertIsNotNone(first)
+        self.assertEqual(
+            [segment.road_id for segment in first.segments],
+            [segment.road_id for segment in second.segments],
+        )
+        self.assertEqual(_loop_overlap_ratio(first), 0.0)
+
+    def test_elevation_score_changes_parallel_road_selection(self):
+        rows = [
+            (1, "Ridgeline", "secondary", 100.0, True, 0, "asphalt", None, [1, 2],
+             wkb.dumps(LineString([(0, 0), (1, 0)])), 0, 1.0, 0, {}, 50.0, 100),
+            (2, "Flat", "secondary", 100.0, True, 0, "asphalt", None, [1, 2],
+             wkb.dumps(LineString([(0, 0), (1, 0)])), 0, 1.0, 0, {}, 0.0, 0),
+        ]
+
+        class Cursor:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def execute(self, *_): pass
+            def fetchall(self): return rows
+
+        class Connection:
+            def cursor(self): return Cursor()
+
+        network = build_network(
+            Connection(), "test", 0, 0, 1000,
+            {"curviness": 0, "traffic": 0, "city_avoidance": 0, "scenery": 0, "elevation": 1},
+        )
+        segments = _edges_to_segments(
+            network.scenic, [("osm", 1), ("osm", 2)], "cost", set(), False
+        )
+        self.assertEqual(segments[0].road_id, 1)
+        self.assertEqual(segments[0].elevation_score, 100)
+
     def test_real_scenery_score_changes_parallel_road_selection(self):
         rows = [
             (1, "Lakeside", "secondary", 100.0, True, 0, "asphalt", None, [1, 2],

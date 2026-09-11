@@ -39,7 +39,9 @@ CREATE TABLE routing_roads (
     curviness_score INTEGER,
     urban_conflict_penalty REAL,
     scenery_score INTEGER,
-    scenery_signals_json TEXT
+    scenery_signals_json TEXT,
+    elevation_gain_m REAL,
+    elevation_score INTEGER
 );
 
 CREATE INDEX routing_roads_region_idx ON routing_roads(region);
@@ -58,6 +60,7 @@ SELECT r.id, r.region, r.name, r.highway, r.length_m,
        ST_AsBinary(r.geom),
        rs.curviness_score, rs.urban_conflict_penalty,
        rs.scenery_score, rs.scenery_signals::text,
+       rs.elevation_gain_m, rs.elevation_score,
        ST_XMin(Box3D(r.geom)), ST_XMax(Box3D(r.geom)),
        ST_YMin(Box3D(r.geom)), ST_YMax(Box3D(r.geom))
 FROM roads r
@@ -130,15 +133,15 @@ def export_snapshot(
                                 row[0], row[1], row[2], row[3], row[4],
                                 int(row[5]), row[6], row[7], row[8], row[9],
                                 bytes(row[10]), row[11], row[12], row[13],
-                                row[14],
+                                row[14], row[15], row[16],
                             )
                         )
-                        bounds_rows.append((row[0], row[15], row[16], row[17], row[18]))
-                        scored += int(row[11] is not None or row[13] is not None)
+                        bounds_rows.append((row[0], row[17], row[18], row[19], row[20]))
+                        scored += int(row[11] is not None or row[13] is not None or row[16] is not None)
                     sqlite_conn.executemany(
                         """
                         INSERT INTO routing_roads VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         """,
                         road_rows,

@@ -14,7 +14,8 @@ import sqlite3
 from pathlib import Path
 
 
-DESKTOP_SCHEMA_VERSION = "1"
+DESKTOP_SCHEMA_VERSION = "2"
+SUPPORTED_DESKTOP_SCHEMA_VERSIONS = {"1", DESKTOP_SCHEMA_VERSION}
 # PostgreSQL's PostGIS GiST `&&` index stores outward-rounded float bounding
 # boxes. Match that harmless sub-meter tolerance so a road lying directly on
 # the search envelope is not lost when the desktop RTree uses its own float
@@ -41,11 +42,12 @@ class SQLiteRoadStore:
         version_row = self._conn.execute(
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()
-        if not version_row or version_row[0] != DESKTOP_SCHEMA_VERSION:
+        if not version_row or version_row[0] not in SUPPORTED_DESKTOP_SCHEMA_VERSIONS:
             self.close()
             raise RoadStoreConfigurationError(
                 "Desktop routing database has an unsupported schema version."
             )
+        self.schema_version = version_row[0]
 
     def fetch_candidate_roads(
         self,
@@ -55,12 +57,17 @@ class SQLiteRoadStore:
         max_lon: float,
         max_lat: float,
     ) -> list[tuple]:
+        elevation_columns = (
+            "r.elevation_gain_m, r.elevation_score"
+            if self.schema_version == "2" else "NULL AS elevation_gain_m, NULL AS elevation_score"
+        )
         rows = self._conn.execute(
-            """
+            f"""
             SELECT r.id, r.name, r.highway, r.length_m, r.scenic_eligible,
                    r.oneway_direction, r.surface, r.tracktype, r.node_ids_json,
                    r.geom_wkb, r.curviness_score, r.urban_conflict_penalty,
-                   r.scenery_score, r.scenery_signals_json
+                   r.scenery_score, r.scenery_signals_json,
+                   {elevation_columns}
             FROM road_bounds b
             JOIN routing_roads r ON r.id = b.id
             WHERE r.region = ?
@@ -80,7 +87,7 @@ class SQLiteRoadStore:
                 row[0], row[1], row[2], row[3], bool(row[4]), row[5],
                 row[6], row[7], json.loads(row[8]) if row[8] else None,
                 bytes(row[9]), row[10], row[11], row[12],
-                json.loads(row[13]) if row[13] else None,
+                json.loads(row[13]) if row[13] else None, row[14], row[15],
             )
             for row in rows
         ]

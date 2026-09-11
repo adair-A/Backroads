@@ -17,3 +17,7 @@ source repository.
 
 The OpenFreeMap basemap is loaded over the internet and carries its own
 on-map attribution in the route planner.
+
+Address search uses OpenStreetMap Nominatim by default and is attributed to
+OpenStreetMap contributors. Its public-service usage policy is available at:
+https://operations.osmfoundation.org/policies/nominatim/

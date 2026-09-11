@@ -7,6 +7,10 @@ BACKROAD BETA FOR WINDOWS
 4. The route planner opens in your default browser.
 5. Return to the console and press Enter when finished.
 
+Enter a start address and optionally a destination. If destination is blank,
+Backroad automatically plans a scenic loop returning to the start address.
+Address lookup and basemap tiles require an internet connection.
+
 This beta is not yet code-signed. If Windows shows an Unblock checkbox in the
 downloaded zip's Properties dialog, select it before choosing Extract All.
 Only run beta copies received directly from the Backroad developer.

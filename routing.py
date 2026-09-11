@@ -96,6 +96,8 @@ class RouteSegment:
     is_connector: bool = False  # last-mile link to/from the exact pin, not part of "the fun route"
     scenery_score: int | None = None
     scenery_signals: dict = field(default_factory=dict)
+    elevation_gain_m: float | None = None
+    elevation_score: int | None = None
 
 
 def _reversed_segment(segment: RouteSegment) -> RouteSegment:
@@ -124,6 +126,8 @@ class GeneratedRoute:
                         "curviness_score": s.curviness_score,
                         "scenery_score": s.scenery_score,
                         "scenery_signals": s.scenery_signals,
+                        "elevation_gain_m": s.elevation_gain_m,
+                        "elevation_score": s.elevation_score,
                         "scenic_eligible": s.scenic_eligible,
                         "is_connector": s.is_connector,
                     },
@@ -199,7 +203,8 @@ def build_network(
                        r.oneway_direction, r.surface, r.tracktype, r.node_ids,
                        ST_AsBinary(r.geom) AS geom_wkb,
                        rs.curviness_score, rs.urban_conflict_penalty,
-                       rs.scenery_score, rs.scenery_signals
+                       rs.scenery_score, rs.scenery_signals,
+                       rs.elevation_gain_m, rs.elevation_score
                 FROM roads r
                 LEFT JOIN road_scores rs ON rs.road_id = r.id
                 WHERE r.region = %s
@@ -224,6 +229,7 @@ def build_network(
     traffic_weight = weights.get("traffic", 0.5)
     city_avoidance = weights.get("city_avoidance", 0.75)
     scenery_weight = weights.get("scenery", 0.5)
+    elevation_weight = weights.get("elevation", 0.0)
     paved_only = weights.get("paved_only", True)
 
     # Count exact OSM node identities first. Coordinate matching is retained
@@ -232,6 +238,10 @@ def build_network(
     parsed_rows = []
     node_counts = Counter()
     for row in rows:
+        # Focused tests and schema-v1 desktop snapshots used the original
+        # fourteen-column contract. Missing elevation is intentionally neutral.
+        if len(row) == 14:
+            row = (*row, None, None)
         if not _surface_allowed(row[2], row[6], paved_only):
             continue
         coords = list(shapely_wkb.loads(bytes(row[9])).coords)
@@ -278,18 +288,21 @@ def build_network(
     # Clear each parsed row as it is consumed. This keeps temporary geometry
     # and node-id arrays from overlapping the complete finished graph at peak.
     for row_index in range(len(parsed_rows)):
-        road_id, name, highway, length_m, scenic_eligible, oneway_direction, surface, tracktype, coords, keys, curviness_score, urban_penalty, scenery_score, scenery_signals = parsed_rows[row_index]
+        road_id, name, highway, length_m, scenic_eligible, oneway_direction, surface, tracktype, coords, keys, curviness_score, urban_penalty, scenery_score, scenery_signals, elevation_gain_m, elevation_score = parsed_rows[row_index]
         parsed_rows[row_index] = None
         curviness_norm = (curviness_score or 0) / 100.0
         conflict_norm = urban_penalty if urban_penalty is not None else 1.0
         scenery_norm = (scenery_score or 0) / 100.0
         effective_scenery_weight = scenery_weight if scenery_score is not None else 0.0
+        elevation_norm = (elevation_score or 0) / 100.0
+        effective_elevation_weight = elevation_weight if elevation_score is not None else 0.0
         desirability = (
             curviness_norm * curviness_weight
             + conflict_norm * traffic_weight
             + scenery_norm * effective_scenery_weight
+            + elevation_norm * effective_elevation_weight
         )
-        max_possible = curviness_weight + traffic_weight + effective_scenery_weight
+        max_possible = curviness_weight + traffic_weight + effective_scenery_weight + effective_elevation_weight
         discount = MAX_DISCOUNT * (desirability / max_possible) if max_possible > 0 else 0.0
         urban_cost_multiplier = 1.0 + (
             city_avoidance * (1.0 - conflict_norm) * CITY_CONFLICT_MAX_PENALTY
@@ -336,6 +349,8 @@ def build_network(
                 coords=piece_coords, surface=surface, tracktype=tracktype,
                 scenery_score=scenery_score,
                 scenery_signals=scenery_signals or {},
+                elevation_gain_m=(elevation_gain_m * chord_length / chord_total) if elevation_gain_m is not None else None,
+                elevation_score=elevation_score,
             )
             full.add_node(u, lon=a[0], lat=a[1])
             full.add_node(v, lon=b[0], lat=b[1])
@@ -494,7 +509,10 @@ def _connect_to_scenic_network(
     return entry_node, connector_segments
 
 
-def _pick_waypoints(graph, anchor_node, target_distance_m: float, n_waypoints: int = 4):
+def _pick_waypoints(
+    graph, anchor_node, target_distance_m: float, n_waypoints: int = 4,
+    *, base_angle: float | None = None,
+):
     """Picks rough anchor points forming a loop shape around the anchor, at
     about target_distance / n_waypoints from each other. These are just
     geometric targets -- the actual road selection happens in the weighted
@@ -507,7 +525,7 @@ def _pick_waypoints(graph, anchor_node, target_distance_m: float, n_waypoints: i
     meters_per_deg_lon = 111_320.0 * math.cos(math.radians(anchor_lat))
 
     waypoints = []
-    base_angle = random.uniform(0, 2 * math.pi)
+    base_angle = random.uniform(0, 2 * math.pi) if base_angle is None else base_angle
     for i in range(1, n_waypoints):
         angle = base_angle + (2 * math.pi * i / n_waypoints)
         radius_m = leg_distance_m * n_waypoints / (2 * math.pi) * 1.1
@@ -517,21 +535,12 @@ def _pick_waypoints(graph, anchor_node, target_distance_m: float, n_waypoints: i
     return waypoints
 
 
-def generate_loop(
-    network: RoadNetwork, start_lon: float, start_lat: float, target_distance_m: float,
-):
-    entry_node, connector_out = _connect_to_scenic_network(network, start_lon, start_lat)
-    if entry_node is None:
-        return None
-
-    waypoints = _pick_waypoints(network.scenic, entry_node, target_distance_m)
+def _build_loop_from_waypoints(network: RoadNetwork, entry_node, connector_out, waypoints):
+    """Build one loop candidate from an already-selected waypoint ring."""
     if any(waypoint is None for waypoint in waypoints):
         return None
     stops = [entry_node] + waypoints + [entry_node]
-
     route = GeneratedRoute()
-    seen_edges: set = set()
-
     for seg in connector_out:
         route.segments.append(seg)
         route.total_length_m += seg.length_m
@@ -542,25 +551,77 @@ def generate_loop(
         try:
             path, graph_used, _used_fallback = _path_with_fallback(network, a, b)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
-            logger.warning("No complete loop path between %s and %s.", a, b)
             return None
-        for seg in _edges_to_segments(graph_used, path, "cost", seen_edges, is_connector=False):
+        for seg in _edges_to_segments(graph_used, path, "cost", set(), is_connector=False):
             route.segments.append(seg)
             route.total_length_m += seg.length_m
 
-    # Return to the exact starting pin the same way we left -- this is the
-    # only way back to a literal driveway, and reusing the same connector
-    # (rather than searching for a fresh residential path back) keeps the
-    # "how much of this is actually a neighborhood street" footprint minimal
-    # and predictable.
     for seg in reversed(connector_out):
         seg = _reversed_segment(seg)
         route.segments.append(seg)
         route.total_length_m += seg.length_m
+    return route if route.segments else None
 
-    if not route.segments:
+
+def _loop_overlap_ratio(route: GeneratedRoute) -> float:
+    """Fraction of non-connector distance that repeats the same road piece.
+
+    Direction is intentionally ignored so immediate out-and-back traversal is
+    penalized as strongly as repeating a piece in the same direction.
+    """
+    seen = set()
+    total = repeated = 0.0
+    for segment in route.segments:
+        if segment.is_connector or not segment.coords:
+            continue
+        first = tuple(round(value, 6) for value in segment.coords[0])
+        last = tuple(round(value, 6) for value in segment.coords[-1])
+        endpoints = tuple(sorted((first, last)))
+        identity = (segment.road_id, endpoints)
+        total += segment.length_m
+        if identity in seen:
+            repeated += segment.length_m
+        else:
+            seen.add(identity)
+    return repeated / total if total else 1.0
+
+
+def _loop_candidate_cost(route: GeneratedRoute, target_distance_m: float) -> float:
+    distance_error = abs(route.total_length_m - target_distance_m) / max(target_distance_m, 1.0)
+    connector_ratio = (
+        sum(segment.length_m for segment in route.segments if segment.is_connector)
+        / max(route.total_length_m, 1.0)
+    )
+    return distance_error * 1.5 + _loop_overlap_ratio(route) * 3.0 + connector_ratio
+
+
+def generate_loop(
+    network: RoadNetwork, start_lon: float, start_lat: float, target_distance_m: float,
+    *, candidate_count: int = 8,
+):
+    """Generate deterministic alternatives and select the least repetitive loop."""
+    entry_node, connector_out = _connect_to_scenic_network(network, start_lon, start_lat)
+    if entry_node is None:
         return None
-    return route
+    candidates = []
+    for index in range(max(1, candidate_count)):
+        angle = 2 * math.pi * index / max(1, candidate_count)
+        waypoints = _pick_waypoints(
+            network.scenic, entry_node, target_distance_m, base_angle=angle
+        )
+        route = _build_loop_from_waypoints(network, entry_node, connector_out, waypoints)
+        if route is not None:
+            candidates.append(route)
+    if not candidates:
+        logger.warning("No complete loop candidate could be generated.")
+        return None
+    winner = min(candidates, key=lambda route: _loop_candidate_cost(route, target_distance_m))
+    logger.info(
+        "Selected loop from %d alternatives: %.1f%% repeated, %.1f%% distance error.",
+        len(candidates), _loop_overlap_ratio(winner) * 100,
+        abs(winner.total_length_m - target_distance_m) / max(target_distance_m, 1.0) * 100,
+    )
+    return winner
 
 
 def generate_exploration_loop(
